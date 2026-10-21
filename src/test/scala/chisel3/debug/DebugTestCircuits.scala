@@ -29,9 +29,9 @@ object DebugTestUtils extends Matchers {
   }
 
   private def attrPart(name: String, value: String): String = s"""[^)]*$name\\s*=\\s*"${q(value)}""""
-  // An enum node carries its variants inline (typeName + variants JSON + width).
+  // An enum node carries its variants inline (typeName + one param per variant + width).
   private def enumPart(et: Option[String]): String =
-    et.fold("")(tn => attrPart("enumTypeName", tn) + """[^)]*variants\s*=\s*"""" + """[^)]*width\s*=""")
+    et.fold("")(tn => attrPart("enumTypeName", tn) + """[^)]*variant_\w+\s*=\s*\d+""" + """[^)]*width\s*=""")
 
   private def intrinsic(kind: String, attrs: String*): String =
     s"""intrinsic\\(circt_debug_$kind<${attrs.mkString}"""

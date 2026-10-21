@@ -134,21 +134,19 @@ private[chisel3] object DebugIntrinsics {
       subCmds ++ createDebugIntrinsic(target, typeName, parent, extractParams(target), si).toSeq
     }
 
-    private case class EnumVariant(name: String, value: String)
-    private implicit val enumVariantRW: json.ReadWriter[EnumVariant] = json.macroRW
-
     private def enumNames(e: EnumType): (String, String) = {
       val fqn = e.factory.enumTypeName.stripSuffix("$")
       (fqn, fqn.split("\\.").last)
     }
 
-    // The width is what stops the downstream IntegerAttr from defaulting to i64.
+    // One `variant_<name>` parameter per variant. The width is what stops the
+    // downstream IntegerAttr from defaulting to i64.
     private def enumVariantsParams(e: EnumType): Seq[(String, Param)] = {
-      val variants = e.factory.allWithNames.map { case (v, name) => EnumVariant(name, v.litValue.toString) }
+      val variants = e.factory.allWithNames.map { case (v, name) => s"variant_$name" -> IntParam(v.litValue) }
       val widthParam: Seq[(String, Param)] =
         if (e.width.known) Seq("width" -> IntParam(BigInt(e.width.get)))
         else Nil
-      ("variants" -> StringParam(json.write(variants))) +: widthParam
+      variants ++ widthParam
     }
 
     private def createIntrinsic(target: BaseModule, instance: Option[String], si: SourceInfo): Seq[Command] = Seq(
