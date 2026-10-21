@@ -3,7 +3,7 @@ package chisel3.debug
 
 import chisel3._
 import chisel3.experimental.IntrinsicModule
-import chisel3.experimental.hierarchy.Definition
+import chisel3.experimental.hierarchy.{Definition, Instance}
 import chisel3.internal.firrtl.ir
 import chisel3.properties.{Class => PropertiesClass}
 import chisel3.stage.{ChiselCircuitAnnotation, ChiselGeneratorAnnotation}
@@ -39,6 +39,25 @@ private class DebugTopModule extends Module {
   val sub = Module(new DebugSubModule)
   sub.a := in
   out := sub.b
+}
+
+private class DebugTwoSubModules extends Module {
+  val in = IO(Input(UInt(4.W)))
+  val out = IO(Output(UInt(4.W)))
+  val s0 = Module(new DebugSubModule)
+  val s1 = Module(new DebugSubModule)
+  s0.a := in
+  s1.a := s0.b
+  out := s1.b
+}
+
+private class DebugDefinitionInstance extends Module {
+  val in = IO(Input(UInt(4.W)))
+  val out = IO(Output(UInt(4.W)))
+  val subDef = Definition(new DebugSubModule)
+  val i0 = Instance(subDef)
+  val i1 = Instance(subDef)
+  out := in
 }
 
 private class DebugParamBundle(val n: Int) extends Bundle {
@@ -82,6 +101,24 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
       val chirrtl = emit(new DebugTopModule)
       countOccurrences(chirrtl, moduleInfoPattern("DebugTopModule")) should be(1)
       countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule")) should be(1)
+    }
+
+    it("records the class of a submodule at its instance and the top on itself") {
+      val chirrtl = emit(new DebugTopModule)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("sub"))) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugTopModule") + "[^)]*instance") should be(0)
+    }
+
+    it("records the class at a D/I Instance") {
+      val chirrtl = emit(new DebugDefinitionInstance)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("i0"))) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("i1"))) should be(1)
+    }
+
+    it("emits one moduleinfo per instance of a module") {
+      val chirrtl = emit(new DebugTwoSubModules)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("s0"))) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("s1"))) should be(1)
     }
 
     it("emits moduleinfo with constructor params serialized in params field") {

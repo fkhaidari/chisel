@@ -9,6 +9,7 @@ import chisel3.internal.binding._
 import chisel3.internal.firrtl.ir._
 import chisel3.debug.CtorParamExtractor.dataToTypeName
 import chisel3.experimental.{BaseModule, SourceInfo}
+import chisel3.experimental.hierarchy.ModuleClone
 
 import scala.collection.mutable
 import upickle.{default => json}
@@ -16,29 +17,33 @@ import upickle.{default => json}
 private[chisel3] object DebugIntrinsics {
 
   def generate(circuit: Circuit): Unit = {
-    val emitter = new ComponentDebugEmitter
+    val modules = circuit.components.collect { case m: DefModule => m.id: BaseModule }.toSet
+    val emitter = new ComponentDebugEmitter(circuit.name, modules)
     circuit.components.foreach(emitter.generate)
   }
 
-  private class ComponentDebugEmitter extends LazyLogging {
+  // The class of a module is recorded where it is instantiated, since that is
+  // what the class describes. Only the top module, which has no instantiation
+  // site, records it on itself.
+  private class ComponentDebugEmitter(topName: String, modules: Set[BaseModule]) extends LazyLogging {
     private val emittedIds = mutable.HashSet.empty[HasId]
 
     private val ctorExtractor = new CtorParamExtractor
 
     def generate(component: Component): Unit = component match {
-      case ctx @ DefModule(id, _, _, _, ports, block) =>
-        processModule(id, ports ++ ctx.secretPorts, block)
+      case ctx @ DefModule(id, name, _, _, ports, block) =>
+        processModule(id, ports ++ ctx.secretPorts, block, name == topName)
       case ctx @ DefClass(id, _, ports, block) =>
-        processModule(id, ports ++ ctx.secretPorts, block)
+        processModule(id, ports ++ ctx.secretPorts, block, true)
       case _: DefBlackBox        => ()
       case _: DefIntrinsicModule => ()
       case ctx =>
         throw new InternalErrorException(s"generate: unknown Component type: $ctx")
     }
 
-    private def processModule(id: BaseModule, allPorts: Seq[Port], block: Block): Unit = {
+    private def processModule(id: BaseModule, allPorts: Seq[Port], block: Block, recordClass: Boolean): Unit = {
       emittedIds.clear()
-      createIntrinsic(id, id._getSourceLocator).foreach(block.addSecretCommand)
+      if (recordClass) createIntrinsic(id, None, id._getSourceLocator).foreach(block.addSecretCommand)
       allPorts.foreach { p => createIntrinsic(p.id, None, p.sourceInfo).foreach(block.addSecretCommand) }
       processBlock(block)
     }
@@ -58,6 +63,8 @@ private[chisel3] object DebugIntrinsics {
     }
 
     private def generate(cmd: Command): Seq[Command] = cmd match {
+      case e @ DefInstance(si, id, _) if modules(instantiated(id)) =>
+        createIntrinsic(instantiated(id), Some(e.name), si)
       case e: DefPrim[_] => createIntrinsic(e.id, None, e.sourceInfo)
       case DefWire(si, id)                              => createIntrinsic(id, None, si)
       case DefReg(si, id, _)                            => createIntrinsic(id, None, si)
@@ -66,6 +73,12 @@ private[chisel3] object DebugIntrinsics {
       case DefSeqMemory(si, id, t, size, _)             => createIntrinsicMem(id, t, size, si)
       case FirrtlMemory(si, id, t, size, _, _, _, _, _) => createIntrinsicMem(id, t, size, si)
       case _                                            => Seq.empty
+    }
+
+    // A D/I `Instance` points at a clone of the module it instantiates.
+    private def instantiated(id: BaseModule): BaseModule = id match {
+      case c: ModuleClone[_] => c.getProto
+      case _ => id
     }
 
     private def suppressDebugParams(target: Any): Boolean = target match {
@@ -138,12 +151,14 @@ private[chisel3] object DebugIntrinsics {
       ("variants" -> StringParam(json.write(variants))) +: widthParam
     }
 
-    private def createIntrinsic(target: BaseModule, si: SourceInfo): Seq[Command] = Seq(
+    private def createIntrinsic(target: BaseModule, instance: Option[String], si: SourceInfo): Seq[Command] = Seq(
       DefIntrinsic(
         si,
         "circt_debug_moduleinfo",
         Nil,
-        Seq("typeName" -> StringParam(target.desiredName)) ++ paramsAttr(ctorExtractor.getCtorParams(target))
+        Seq("typeName" -> StringParam(target.desiredName)) ++
+          instance.map("instance" -> StringParam(_)) ++
+          paramsAttr(ctorExtractor.getCtorParams(target))
       )
     )
 

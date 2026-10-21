@@ -48,7 +48,8 @@ object DebugTestUtils extends Matchers {
       enumPart(enumTypeName)
     )
 
-  def moduleInfoPattern(typeName: String): String = intrinsic("moduleinfo", attrPart("typeName", typeName))
+  def moduleInfoPattern(typeName: String, instance: Option[String] = None): String =
+    intrinsic("moduleinfo", attrPart("typeName", typeName) + instance.fold("")(attrPart("instance", _)))
 
   // Collapse whitespace so regex helpers ignore line wrapping.
   def emit(gen: => RawModule): String =
