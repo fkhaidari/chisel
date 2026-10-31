@@ -3,9 +3,11 @@
 package chisel3.debug
 
 import chisel3._
-import chisel3.experimental.{fromStringToStringParam, Analog}
+import chisel3.experimental.{fromStringToStringParam, Analog, OpaqueType}
+import chisel3.probe.{define, Probe, ProbeValue}
 import chisel3.util.MixedVec
 import circt.stage.ChiselStage
+import scala.collection.immutable.SeqMap
 import org.scalatest.matchers.should.Matchers
 
 object DebugTestEnum extends ChiselEnum { val EA, EB, EC = Value }
@@ -28,44 +30,40 @@ object DebugTestUtils extends Matchers {
     withNext.filterNot(line => expRe.exists(_.findFirstIn(line).isDefined)).mkString("\n")
   }
 
-  private def attrPart(name: String, value: String): String = s"""[^)]*$name\\s*=\\s*"${q(value)}""""
-  // An enum node carries its variants inline (typeName + one param per variant + width).
-  private def enumPart(et: Option[String]): String =
-    et.fold("")(tn => attrPart("enumTypeName", tn) + """[^)]*variant_\w+\s*=\s*\d+""" + """[^)]*width\s*=""")
+  // Parameters are emitted in a fixed order: target, path (when not empty), name.
+  private def head(kind: String, target: String, path: String): String =
+    s"""intrinsic\\(circt_debug_$kind<target = "${q(target)}"""" +
+      (if (path.isEmpty) "" else s""", path = "${q(path)}"""")
 
-  private def intrinsic(kind: String, attrs: String*): String =
-    s"""intrinsic\\(circt_debug_$kind<${attrs.mkString}"""
+  def typePattern(target: String, path: String, name: String): String =
+    head("type", target, path) + s""", name = "${q(name)}"[,>]"""
 
-  def varPattern(typeName: String, name: String, enumTypeName: Option[String] = None): String =
-    intrinsic("var", attrPart("typeName", typeName), attrPart("name", name), enumPart(enumTypeName))
+  // Any circt_debug_type on exactly this target and path, named or not.
+  def anyTypePattern(target: String, path: String): String =
+    head("type", target, path) + "[,>]"
 
-  def subfieldPattern(typeName: String, name: String, parent: String, enumTypeName: Option[String] = None): String =
-    intrinsic(
-      "subfield",
-      attrPart("typeName", typeName),
-      attrPart("name", name),
-      attrPart("parent", parent),
-      enumPart(enumTypeName)
-    )
+  def enumPattern(target: String, path: String, name: String): String =
+    head("enum", target, path) + s""", name = "${q(name)}", variant_\\w+ = \\d+"""
 
-  def moduleInfoPattern(typeName: String, instance: Option[String] = None): String =
-    intrinsic("moduleinfo", attrPart("typeName", typeName) + instance.fold("")(attrPart("instance", _)))
+  def moduleInfoPattern(name: String, instance: Option[String] = None): String =
+    "intrinsic\\(circt_debug_moduleinfo<" + instance.fold("")(i => s"""instance = "${q(i)}", """) +
+      s"""name = "${q(name)}"[,>]"""
 
   // Collapse whitespace so regex helpers ignore line wrapping.
   def emit(gen: => RawModule): String =
     ChiselStage.emitCHIRRTL(gen, args = Array("--with-experimental-debug-intrinsics")).replaceAll("\\s+", " ")
 
   private val moduleInfoBodyRe = """intrinsic\(circt_debug_moduleinfo<(.*?)>\)""".r
-  private val paramsBodyRe = """params\s*=\s*"((?:[^"\\]|\\.)*)"""".r
+  private val extBodyRe = """ext_chisel\s*=\s*"((?:[^"\\]|\\.)*)"""".r
 
-  def requireParams(chirrtl: String, typeName: String): String = {
-    val tnPat = s"""typeName\\s*=\\s*"${q(typeName)}"""".r
+  def requireParams(chirrtl: String, name: String): String = {
+    val namePat = s"""name\\s*=\\s*"${q(name)}"""".r
     moduleInfoBodyRe
       .findAllMatchIn(chirrtl)
       .map(_.group(1))
-      .find(body => tnPat.findFirstIn(body).isDefined)
-      .flatMap(body => paramsBodyRe.findFirstMatchIn(body).map(_.group(1)))
-      .getOrElse(fail(s"no circt_debug_moduleinfo for $typeName"))
+      .find(body => namePat.findFirstIn(body).isDefined)
+      .flatMap(body => extBodyRe.findFirstMatchIn(body).map(_.group(1)))
+      .getOrElse(fail(s"no circt_debug_moduleinfo with ext_chisel for $name"))
   }
 
   def assertParam(params: String, name: String, typeName: String, value: Any): Unit = {
@@ -182,6 +180,16 @@ object DebugTestCircuits {
       }
     }
 
+    class TopCircuitVecNesting extends RawModule {
+      val vv = IO(Input(Vec(2, Vec(3, new MyBundle))))
+      val mv = IO(Input(MixedVec(new MyBundle, UInt(4.W))))
+      val _unnamed = IO(Input(new MyBundle))
+      val w = Wire(new MyBundle)
+      w := vv(0)(0)
+      val _hidden = Wire(new MyBundle)
+      _hidden := w
+    }
+
     class TopCircuitBundleWithVec(b: BindingChoice) extends DebugTestModule(b) {
       override def body: Unit = {
         val a = b(new Bundle { val vec = Vec(5, UInt(8.W)) })
@@ -231,10 +239,74 @@ object DebugTestCircuits {
       val v = IO(Input(Vec(3, DebugTestEnum())))
     }
 
+    object NestedEnum extends ChiselEnum { val NA, NB = Value }
+    class TopCircuitEnumNested extends RawModule {
+      val n = IO(Input(NestedEnum()))
+    }
+
+    class TopCircuitEnumLocal extends RawModule {
+      private def mk() = {
+        object LocalEnum extends ChiselEnum { val LA, LB = Value }
+        LocalEnum
+      }
+      val l = IO(Input(mk()()))
+    }
+
+    class TopCircuitBoolNode extends RawModule {
+      val sel = IO(Input(UInt(3.W)))
+      val out = IO(Output(Bool()))
+      out := false.B
+      when(sel =/= 7.U) {
+        val isZero = sel === 0.U
+        out := isZero
+      }
+    }
+
+    class DebugOpaque extends Record with OpaqueType {
+      val elements = SeqMap("" -> new MyBundle)
+    }
+
+    class TopCircuitOpaque extends RawModule {
+      val o = IO(Input(new DebugOpaque))
+    }
+
+    class DebugOpaqueEnum extends Record with OpaqueType {
+      val elements = SeqMap("" -> DebugTestEnum())
+    }
+
+    class DebugOpaqueNested extends Record with OpaqueType {
+      val elements = SeqMap("" -> new DebugOpaque)
+    }
+
+    class TopCircuitOpaqueWrapped extends RawModule {
+      val e = IO(Input(new DebugOpaqueEnum))
+      val n = IO(Input(new DebugOpaqueNested))
+    }
+
+    class TopCircuitProbe extends RawModule {
+      val io = IO(new Bundle {
+        val a = Output(Bool())
+        val p = Output(Probe(Bool()))
+      })
+      io.a := true.B
+      val w = WireInit(true.B)
+      define(io.p, ProbeValue(w))
+    }
+
+    class TopCircuitOnlyProbes extends RawModule {
+      val io = IO(new Bundle {
+        val p = Output(Probe(UInt(8.W)))
+      })
+      val w = WireInit(0.U(8.W))
+      define(io.p, ProbeValue(w))
+    }
+
   }
 
   object MemCircuits {
     class TopCircuitMem[T <: Data](gen: T) extends Module { val mem = Mem(4, gen) }
     class TopCircuitSyncMem[T <: Data](gen: T) extends Module { val mem = SyncReadMem(4, gen) }
+    class TopCircuitVecMem extends Module { val mem = Mem(4, Vec(2, new DataTypesCircuits.MyBundle)) }
+    class TopCircuitSram[T <: Data](gen: T) extends Module { val mem = chisel3.util.SRAM(4, gen, 1, 1, 0) }
   }
 }

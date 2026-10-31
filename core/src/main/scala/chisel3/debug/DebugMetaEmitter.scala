@@ -10,7 +10,10 @@ import chisel3.internal.firrtl.ir._
 import chisel3.debug.CtorParamExtractor.dataToTypeName
 import chisel3.experimental.{BaseModule, SourceInfo}
 import chisel3.experimental.hierarchy.ModuleClone
+import chisel3.reflect.DataMirror
+import chisel3.util.simpleClassName
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 import upickle.{default => json}
 
@@ -33,8 +36,8 @@ private[chisel3] object DebugIntrinsics {
     def generate(component: Component): Unit = component match {
       case ctx @ DefModule(id, name, _, _, ports, block) =>
         processModule(id, ports ++ ctx.secretPorts, block, name == topName)
-      case ctx @ DefClass(id, _, ports, block) =>
-        processModule(id, ports ++ ctx.secretPorts, block, true)
+      // Intrinsics in a class are dropped by CIRCT.
+      case _: DefClass           => ()
       case _: DefBlackBox        => ()
       case _: DefIntrinsicModule => ()
       case ctx =>
@@ -44,7 +47,7 @@ private[chisel3] object DebugIntrinsics {
     private def processModule(id: BaseModule, allPorts: Seq[Port], block: Block, recordClass: Boolean): Unit = {
       emittedIds.clear()
       if (recordClass) createIntrinsic(id, None, id._getSourceLocator).foreach(block.addSecretCommand)
-      allPorts.foreach { p => createIntrinsic(p.id, None, p.sourceInfo).foreach(block.addSecretCommand) }
+      allPorts.foreach { p => createIntrinsic(p.id, p.sourceInfo).foreach(block.addSecretCommand) }
       processBlock(block)
     }
 
@@ -63,16 +66,17 @@ private[chisel3] object DebugIntrinsics {
     }
 
     private def generate(cmd: Command): Seq[Command] = cmd match {
-      case e @ DefInstance(si, id, _) if modules(instantiated(id)) =>
-        createIntrinsic(instantiated(id), Some(e.name), si)
-      case e: DefPrim[_] => createIntrinsic(e.id, None, e.sourceInfo)
-      case DefWire(si, id)                              => createIntrinsic(id, None, si)
-      case DefReg(si, id, _)                            => createIntrinsic(id, None, si)
-      case DefRegInit(si, id, _, _, _)                  => createIntrinsic(id, None, si)
-      case DefMemory(si, id, t, size)                   => createIntrinsicMem(id, t, size, si)
-      case DefSeqMemory(si, id, t, size, _)             => createIntrinsicMem(id, t, size, si)
-      case FirrtlMemory(si, id, t, size, _, _, _, _, _) => createIntrinsicMem(id, t, size, si)
-      case _                                            => Seq.empty
+      case e @ DefInstance(si, id, _) =>
+        val m = instantiated(id)
+        if (modules(m)) createIntrinsic(m, Some(e.name), si) else Seq.empty
+      case e: DefPrim[_] => createIntrinsic(e.id, e.sourceInfo)
+      case DefWire(si, id)                           => createIntrinsic(id, si)
+      case DefReg(si, id, _)                         => createIntrinsic(id, si)
+      case DefRegInit(si, id, _, _, _)               => createIntrinsic(id, si)
+      case DefMemory(si, id, t, _)                   => createIntrinsicMem(id, t, si)
+      case DefSeqMemory(si, id, t, _, _)             => createIntrinsicMem(id, t, si)
+      case FirrtlMemory(si, id, t, _, _, _, _, _, _) => createIntrinsicMem(id, t, si)
+      case _                                         => Seq.empty
     }
 
     // A D/I `Instance` points at a clone of the module it instantiates.
@@ -92,11 +96,13 @@ private[chisel3] object DebugIntrinsics {
     private def extractParams(target: Any): Seq[ClassParam] =
       if (suppressDebugParams(target)) Nil else ctorExtractor.getCtorParams(target)
 
-    private def paramsAttr(params: Seq[ClassParam]): Seq[(String, Param)] =
-      if (params.isEmpty) Nil else Seq("params" -> StringParam(json.write(params)))
+    private def extChisel(params: Seq[ClassParam], extra: (String, ujson.Value)*): Seq[(String, Param)] = {
+      val ext = Option.when(params.nonEmpty)("params" -> json.writeJs(params)).toSeq ++ extra
+      if (ext.isEmpty) Nil else Seq("ext_chisel" -> StringParam(ujson.write(ujson.Obj.from(ext))))
+    }
 
-    private def createIntrinsicMem(target: HasId, innerType: Data, size: BigInt, si: SourceInfo): Seq[Command] = {
-      val typeName = s"${target.getClass.getSimpleName}[${dataToTypeName(innerType)}[$size]]"
+    // The memory kind goes on the memory itself, the element type on `[*]`.
+    private def createIntrinsicMem(target: HasId, innerType: Data, si: SourceInfo): Seq[Command] = {
       val name = target.getOptionRef
         .map(_.localName)
         .getOrElse(target match {
@@ -107,92 +113,115 @@ private[chisel3] object DebugIntrinsics {
         logger.warn(s"createIntrinsicMem: skipping memory with empty name: $target")
         return Seq.empty
       }
-      Seq(
-        DefIntrinsic(
-          si,
-          "circt_debug_var",
-          Nil,
-          Seq("typeName" -> StringParam(typeName), "name" -> StringParam(name)) ++ paramsAttr(extractParams(target))
-        )
-      )
+      val kind = "memory" -> ujson.Str(target match {
+        case _: SramTarget => "SRAM"
+        case _ => target.getClass.getSimpleName
+      })
+      typeIntrinsic(si, name, "", None, Nil, kind) +: dataIntrinsics(innerType, name, "[*]", si)
     }
 
-    private def createIntrinsic(target: Data, parent: Option[String], si: SourceInfo): Seq[Command] = {
+    private def createIntrinsic(target: Data, si: SourceInfo): Seq[Command] = {
       if (!emittedIds.add(target)) return Seq.empty
-      val typeName = dataToTypeName(target)
-      // `parent` on every subfield carries the *root* variable's FQN (the name of
-      // the enclosing `circt_debug_var`), not the immediate enclosing bundle.
-      // CIRCT's CirctDebugVarConverter matches leaves to the root by exact equality.
-      val childParent: Option[String] = parent.orElse(Some(signalRef(target)))
-      val subCmds: Seq[Command] = target match {
-        case record: Record =>
-          record.elements.values.flatMap(createIntrinsic(_, childParent, si)).toSeq
-        case vecLike: VecLike[_] =>
-          vecLike.toSeq.flatMap(e => createIntrinsic(e.asInstanceOf[Data], childParent, si))
+      val name = signalRef(target)
+      // Synthetic `_`-prefixed names don't survive to final FIRRTL.
+      if (name.isEmpty || name.startsWith("_")) return Seq.empty
+      dataIntrinsics(target, name, "", si)
+    }
+
+    // Only what FIRRTL cannot tell is sent: the class of a Record, `Bool`,
+    // `Analog` and enums. A Vec element is described once, under `[*]`.
+    private def dataIntrinsics(data: Data, target: String, path: String, si: SourceInfo): Seq[Command] = {
+      if (onlyProbes(data)) return Nil
+      data match {
+        case _: chisel3.domain.Type => Nil
+        case e: EnumType =>
+          val variants = e.factory.allWithNames.map { case (v, n) => s"variant_$n" -> IntParam(v.litValue) }
+          Seq(intrinsic(si, "circt_debug_enum", target, path, Some(enumName(e)), variants))
+        case r: Record if r._isOpaqueType =>
+          // An opaque type has no FIRRTL field of its own, so it shares the
+          // path with its single element; the element itself is not described,
+          // except an enum, which takes the path over from the wrapper.
+          // Nested opaque types collapse into the outermost one.
+          opaqueElement(r) match {
+            case e: EnumType => dataIntrinsics(e, target, path, si)
+            case d => recordIntrinsic(r, target, path, si) +: children(d, target, path, si)
+          }
+        case r: Record => recordIntrinsic(r, target, path, si) +: children(r, target, path, si)
+        case v: Vec[_] => children(v, target, path, si)
+        case _: Bool   => Seq(typeIntrinsic(si, target, path, Some("Bool"), Nil))
+        case a: chisel3.experimental.Analog =>
+          Seq(typeIntrinsic(si, target, path, Some(dataToTypeName(a)), Nil))
         case _ => Nil
       }
-      subCmds ++ createDebugIntrinsic(target, typeName, parent, extractParams(target), si).toSeq
     }
 
-    private def enumNames(e: EnumType): (String, String) = {
-      val fqn = e.factory.enumTypeName.stripSuffix("$")
-      (fqn, fqn.split("\\.").last)
+    // CIRCT removes a declaration made only of probes or properties before
+    // it reads the debug metadata, so it must not be named by an intrinsic.
+    private def onlyProbes(data: Data): Boolean = data match {
+      case _ if DataMirror.hasProbeTypeModifier(data) || DataMirror.isProperty(data) => true
+      case r: Record => r._elements.nonEmpty && r._elements.values.forall(onlyProbes)
+      case v: Vec[_] => v.length > 0 && onlyProbes(v.sample_element)
+      case _         => false
     }
 
-    // One `variant_<name>` parameter per variant. The width is what stops the
-    // downstream IntegerAttr from defaulting to i64.
-    private def enumVariantsParams(e: EnumType): Seq[(String, Param)] = {
-      val variants = e.factory.allWithNames.map { case (v, name) => s"variant_$name" -> IntParam(v.litValue) }
-      val widthParam: Seq[(String, Param)] =
-        if (e.width.known) Seq("width" -> IntParam(BigInt(e.width.get)))
-        else Nil
-      variants ++ widthParam
+    @tailrec private def opaqueElement(r: Record): Data = r._elements.head._2 match {
+      case o: Record if o._isOpaqueType => opaqueElement(o)
+      case d => d
     }
+
+    private def children(data: Data, target: String, path: String, si: SourceInfo): Seq[Command] = data match {
+      case r: Record =>
+        r._elements.toSeq.reverse.flatMap {
+          case (field, d: Data) => dataIntrinsics(d, target, s"$path.$field", si)
+          case _                => Nil
+        }
+      case v: Vec[_] if v.length > 0 => dataIntrinsics(v.sample_element, target, s"$path[*]", si)
+      case _ => Nil
+    }
+
+    private def recordIntrinsic(r: Record, target: String, path: String, si: SourceInfo): Command =
+      typeIntrinsic(si, target, path, Some(r.className), extractParams(r))
+
+    private def typeIntrinsic(
+      si:     SourceInfo,
+      target: String,
+      path:   String,
+      name:   Option[String],
+      params: Seq[ClassParam],
+      extra:  (String, ujson.Value)*
+    ) =
+      intrinsic(si, "circt_debug_type", target, path, name, extChisel(params, extra: _*))
+
+    private def intrinsic(
+      si:     SourceInfo,
+      kind:   String,
+      target: String,
+      path:   String,
+      name:   Option[String],
+      rest:   Seq[(String, Param)]
+    ): Command =
+      DefIntrinsic(
+        si,
+        kind,
+        Nil,
+        Seq("target" -> StringParam(target)) ++
+          Option.when(path.nonEmpty)("path" -> StringParam(path)) ++
+          name.map("name" -> StringParam(_)) ++ rest
+      )
+
+    private def enumName(e: EnumType): String =
+      e.factory.enumTypeName.split("[.$]").filterNot(_.forall(_.isDigit)).last
 
     private def createIntrinsic(target: BaseModule, instance: Option[String], si: SourceInfo): Seq[Command] = Seq(
       DefIntrinsic(
         si,
         "circt_debug_moduleinfo",
         Nil,
-        Seq("typeName" -> StringParam(target.desiredName)) ++
-          instance.map("instance" -> StringParam(_)) ++
-          paramsAttr(ctorExtractor.getCtorParams(target))
+        instance.map("instance" -> StringParam(_)).toSeq ++
+          Seq("name" -> StringParam(simpleClassName(target.getClass))) ++
+          extChisel(ctorExtractor.getCtorParams(target))
       )
     )
-
-    private def createDebugIntrinsic(
-      target:   Data,
-      typeName: String,
-      parent:   Option[String],
-      params:   Seq[ClassParam],
-      si:       SourceInfo
-    ): Option[Command] = {
-      val name = signalRef(target)
-      if (name.isEmpty) return None
-      // Synthetic `_`-prefixed names don't survive to final FIRRTL.
-      if (parent.isEmpty && name.startsWith("_")) return None
-      // firrtl.int.generic operands must be passive.
-      val ssaOperands: Seq[Arg] =
-        if (target.direction.isInstanceOf[ActualDirection.Bidirectional]) Nil else Seq(Node(target))
-      val intrinsicName = if (parent.isDefined) "circt_debug_subfield" else "circt_debug_var"
-      val enumParam: Seq[(String, Param)] = target match {
-        case e: EnumType =>
-          val (fqn, simple) = enumNames(e)
-          Seq("enumTypeName" -> StringParam(simple), "enumFqn" -> StringParam(fqn)) ++
-            enumVariantsParams(e)
-        case _ => Nil
-      }
-      val parentParam = parent.map("parent" -> StringParam(_)).toSeq
-      Some(
-        DefIntrinsic(
-          si,
-          intrinsicName,
-          ssaOperands,
-          Seq("typeName" -> StringParam(typeName), "name" -> StringParam(name))
-            ++ parentParam ++ enumParam ++ paramsAttr(params)
-        )
-      )
-    }
   }
 
   private def signalRef(d: Data): String =

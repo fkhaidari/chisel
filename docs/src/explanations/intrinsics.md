@@ -52,19 +52,20 @@ downstream tooling (waveform viewers, debuggers) can reconstruct Bundle, Vec
 and `ChiselEnum` type names as well as module parameters that are lost during
 conversion to plain FIRRTL.
 
-The following intrinsics are emitted:
+The following intrinsics are emitted. They carry only what FIRRTL does not
+already say, and address their target by name rather than by operand:
 
-- `circt_debug_moduleinfo` - one per module, with `typeName` and a JSON-encoded
-  `params` string describing primary constructor arguments.
-- `circt_debug_var` - one per top-level signal, port or memory, with `typeName`
-  and `name`.
-- `circt_debug_subfield` - one per Bundle/Vec element, linked to its parent via
-  a `parent` attribute.
-
-A `ChiselEnum`-typed `circt_debug_var`/`circt_debug_subfield` additionally
-carries its enum metadata inline: `enumTypeName`, `enumFqn`, a JSON-encoded
-`variants` string listing all variants and their literal values, and the
-underlying bit `width`.
+- `circt_debug_moduleinfo` - one per instance (and one for the top module),
+  with `instance`, the Scala class `name` and an optional JSON-encoded
+  `ext_chisel` string describing primary constructor arguments.
+- `circt_debug_type` - names a signal, port, register, node or memory, or a
+  field inside it. `target` is the declaration, `path` the field inside it
+  (`.a.b`, `.0` for a `MixedVec`, `[*]` for every element of a `Vec`), `name`
+  the source type (a Bundle class, `Bool`, `Analog<w>`) and `ext_chisel` the
+  constructor arguments. Types FIRRTL already names (`UInt<8>`, `Clock`, a
+  `Vec` of them) are not described.
+- `circt_debug_enum` - marks a `ChiselEnum` at `target`/`path`, with the enum
+  `name` and one `variant_<V>` parameter per variant.
 
 Emission is opt-in and off by default. Enable it by passing
 `--with-experimental-debug-intrinsics` on the command line, or by adding

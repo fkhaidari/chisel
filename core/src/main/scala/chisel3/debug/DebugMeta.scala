@@ -37,13 +37,12 @@ private[debug] object CtorParamExtractor {
   private[debug] val MaxRenderedLen = 256
   private[debug] val TruncatedSuffix = "...[truncated]"
 
+  // The source type alone: whether it is an IO, a Reg or a Wire comes from the
+  // declaration it names.
   private[debug] def dataToTypeName(data: Data): String = sanitize(data match {
-    case t: Record =>
-      t.topBindingOpt match {
-        case Some(binding) => s"${t._bindingToString(binding)}[${t.className}]"
-        case None          => t.className
-      }
-    case t => t.toString.split(" ").last
+    case t: Record => t.className
+    case t: Vec[_] => s"${dataToTypeName(t.sample_element)}[${t.length}]"
+    case t => t.cloneType.toString
   })
 
   private def sanitize(s: String): String =

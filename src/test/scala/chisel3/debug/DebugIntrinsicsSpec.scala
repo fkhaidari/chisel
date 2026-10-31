@@ -92,21 +92,22 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
       countOccurrences(chirrtl, moduleInfoPattern("DebugSimpleModule")) should be(1)
     }
 
-    it("emits moduleinfo with typeName for a parametrized module") {
+    it("names a module by its class, not by desiredName") {
       val chirrtl = emit(new DebugParamModule(8, false))
-      countOccurrences(chirrtl, moduleInfoPattern("DebugParamModule_w8_rfalse")) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugParamModule")) should be(1)
+      (chirrtl should not).include("""name = "DebugParamModule_w8_rfalse"""")
     }
 
     it("emits moduleinfo for every module in a hierarchy") {
       val chirrtl = emit(new DebugTopModule)
       countOccurrences(chirrtl, moduleInfoPattern("DebugTopModule")) should be(1)
-      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule")) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("sub"))) should be(1)
     }
 
     it("records the class of a submodule at its instance and the top on itself") {
       val chirrtl = emit(new DebugTopModule)
       countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("sub"))) should be(1)
-      countOccurrences(chirrtl, moduleInfoPattern("DebugTopModule") + "[^)]*instance") should be(0)
+      countOccurrences(chirrtl, "circt_debug_moduleinfo<instance = \"[^\"]*\", name = \"DebugTopModule\"") should be(0)
     }
 
     it("records the class at a D/I Instance") {
@@ -121,9 +122,9 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
       countOccurrences(chirrtl, moduleInfoPattern("DebugSubModule", Some("s1"))) should be(1)
     }
 
-    it("emits moduleinfo with constructor params serialized in params field") {
+    it("emits moduleinfo with constructor params in ext_chisel") {
       val chirrtl = emit(new DebugParamModule(5, true))
-      val name = "DebugParamModule_w5_rtrue"
+      val name = "DebugParamModule"
       countOccurrences(chirrtl, moduleInfoPattern(name)) should be(1)
       val params = requireParams(chirrtl, name)
       assertParam(params, "width", "Int", 5) // numbers serialize as JSON strings
@@ -143,10 +144,10 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
       countOccurrences(chirrtl, moduleInfoPattern("DebugMyIntrinsicMod")) should be(0)
     }
 
-    it("emits moduleinfo for chisel3.properties.Class (DefClass)") {
+    it("does not emit moduleinfo for chisel3.properties.Class (DefClass)") {
       val chirrtl = emit(new DebugWithClass)
       countOccurrences(chirrtl, moduleInfoPattern("DebugWithClass")) should be(1)
-      countOccurrences(chirrtl, moduleInfoPattern("DebugMyClass")) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugMyClass")) should be(0)
     }
 
     it("emits moduleinfo with params for a module whose port is a parametrized bundle") {
@@ -166,7 +167,7 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
     it("emits circt_debug_* intrinsics with --with-experimental-debug-intrinsics") {
       val chirrtl = ChiselStage.emitCHIRRTL(new DebugSimpleModule, args = Array("--with-experimental-debug-intrinsics"))
       chirrtl should include("circt_debug_moduleinfo")
-      chirrtl should include("circt_debug_var")
+      chirrtl should include("circt_debug_type")
     }
   }
 
