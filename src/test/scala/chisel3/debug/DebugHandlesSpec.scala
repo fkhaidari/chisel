@@ -2,8 +2,6 @@
 package chisel3.debug
 
 import chisel3._
-import chisel3.stage.{ChiselCircuitAnnotation, ChiselGeneratorAnnotation}
-import chisel3.stage.phases.Elaborate
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -34,10 +32,13 @@ class HandleFlipTop extends RawModule {
       val w = UInt(3.W)
     })
     val v = Vec(2, Flipped(UInt(1.W)))
-    val vb = Vec(2, new Bundle {
-      val p = UInt(1.W)
-      val q = Flipped(UInt(1.W))
-    })
+    val vb = Vec(
+      2,
+      new Bundle {
+        val p = UInt(1.W)
+        val q = Flipped(UInt(1.W))
+      }
+    )
   })
   val inp = IO(Input(new Bundle {
     val a = UInt(1.W)
@@ -55,13 +56,6 @@ class HandleFlipTop extends RawModule {
 }
 
 object DebugHandlesSpec {
-  def emit(rule: DebugHandles.FlipRule): String = {
-    val annos = (new Elaborate).transform(Seq(ChiselGeneratorAnnotation(() => new HandleFlipTop)))
-    val ec = annos.collectFirst { case a: ChiselCircuitAnnotation => a.elaboratedCircuit }.get
-    DebugHandles.generate(ec._circuit, rule)
-    ec.serialize
-  }
-
   // FIRRTL type AST, parsed from the text the emitter printed.
   sealed trait T
   case object G extends T
@@ -71,7 +65,9 @@ object DebugHandlesSpec {
   private class TypeParser(s: String) {
     var i = 0
     def ws(): Unit = while (i < s.length && s(i) == ' ') i += 1
-    def word(): String = { ws(); val st = i; while (i < s.length && !" ,:{}[]".contains(s(i))) i += 1; s.substring(st, i) }
+    def word(): String = {
+      ws(); val st = i; while (i < s.length && !" ,:{}[]".contains(s(i))) i += 1; s.substring(st, i)
+    }
     def tpe(): T = {
       ws()
       var t: T =
@@ -94,12 +90,12 @@ object DebugHandlesSpec {
   }
 
   private def flatten(t: T, path: String, out: mutable.Map[String, Boolean]): Unit = t match {
-    case G => ()
-    case V(e) => flatten(e, path + "[]", out)
+    case G     => ()
+    case V(e)  => flatten(e, path + "[]", out)
     case B(fs) => fs.foreach { case (n, f, c) => out(s"$path.$n") = f; flatten(c, s"$path.$n", out) }
   }
 
-  private val declRe = """^\s*(?:input|output|wire) (\w+) : (.*?)(?: @\[.*\])?$""".r
+  private val declRe = """^\s*(?:input|output|wire|reg|regreset) (\w+) : (.*?)(?: @\[.*\])?$""".r
   private val nodeRe = """^\s*node (\S+) = intrinsic\((circt_debug_\w+)(?:<(.*)>)? : UInt<0>(?:, ([^)]*))?\).*$""".r
   private val varRe = """^\s*intrinsic\(circt_debug_var<name = "(\w+)">, (\S+)\).*$""".r
   private val paramRe = """(\w+) = ("(?:[^"\\]|\\.)*"|-?\d+)""".r
@@ -109,40 +105,17 @@ object DebugHandlesSpec {
     val out = mutable.LinkedHashMap.empty[String, Boolean]
     fir.linesIterator.foreach {
       case declRe(n, t) => flatten(new TypeParser(t).tpe(), n, out)
-      case _ => ()
+      case _            => ()
     }
     out.toMap
   }
 
-  /** path -> flip, as carried by the debug handle tree. */
-  def debugFlips(fir: String): Map[String, Boolean] = {
-    case class N(kind: String, params: Map[String, String], args: Seq[String])
-    val nodes = mutable.Map.empty[String, N]
-    val roots = mutable.ArrayBuffer.empty[(String, String)]
-    fir.linesIterator.foreach {
-      case nodeRe(h, k, ps, as) =>
-        val params = Option(ps).toSeq.flatMap(paramRe.findAllMatchIn(_)).map(m => m.group(1) -> m.group(2)).toMap
-        nodes(h) = N(k, params, Option(as).toSeq.flatMap(_.split(", ").toSeq))
-      case varRe(n, h) => roots += (n -> h)
-      case _ => ()
-    }
-    val out = mutable.LinkedHashMap.empty[String, Boolean]
-    def walk(h: String, path: String): Unit = nodes.get(h).foreach { n =>
-      n.kind match {
-        case "circt_debug_value" => n.args.foreach(walk(_, path))
-        case "circt_debug_struct" =>
-          n.args.foreach { c =>
-            val p = nodes(c).params
-            val name = p("name").stripPrefix("\"").stripSuffix("\"")
-            out(s"$path.$name") = p.get("flip").contains("1")
-            walk(c, s"$path.$name")
-          }
-        case "circt_debug_array" => n.args.foreach(walk(_, path + "[]"))
-      }
-    }
-    roots.foreach { case (n, h) => walk(h, n) }
-    out.toMap
-  }
+  /** path -> flip, as carried by the debug handle tree (array indices as `[]`). */
+  def debugFlips(fir: String): Map[String, Boolean] =
+    DebugTestUtils
+      .debugTree(fir)
+      .collect { case (p, n) if p.contains('.') && !p.endsWith("]") => p.replaceAll("""\[\d+\]""", "[]") -> n.flip }
+      .toMap
 
   def mismatches(fir: String): Seq[String] = {
     val t = typeFlips(fir)
@@ -158,28 +131,43 @@ object DebugHandlesSpec {
 
 class DebugHandlesSpec extends AnyFunSpec with Matchers {
   import DebugHandlesSpec._
+  import DebugTestUtils.emitRaw
 
-  describe("handle-tree prototype") {
+  describe("handle tree") {
     it("emits handles as node = intrinsic(...) and uses them as operands") {
-      val fir = emit(DebugHandles.EmitterFlip)
-      println(fir)
-      fir should include regex """node outw_a_h = intrinsic\(circt_debug_value<name = "a", typeName = "IO\[UInt<8>\]"> : UInt<0>, outw\.a\)"""
-      fir should include regex """node outw_s = intrinsic\(circt_debug_struct : UInt<0>, outw_a_h, outw_f_h\)"""
-      fir should include regex """intrinsic\(circt_debug_var<name = "outw">, outw_h\)"""
+      val fir = emitRaw(new HandleFlipTop)
+      (fir should include).regex(
+        """node outw_a_h = intrinsic\(circt_debug_value<name = "a", typeName = "IO\[UInt<8>\]"> : UInt<0>, outw\.a\)"""
+      )
+      (fir should include).regex(
+        """node outw_f_x_h = intrinsic\(circt_debug_value<name = "x", typeName = "IO\[UInt<4>\]"> : UInt<0>, outw\.f\.x\)"""
+      )
+      (fir should include).regex("""node outw_s = intrinsic\(circt_debug_struct : UInt<0>, outw_a_h, outw_f_h\)""")
+      (fir should include).regex(
+        """node outw_h = intrinsic\(circt_debug_value<typeName = "IO\[AnonymousBundle\]"> : UInt<0>, outw_s\)"""
+      )
+      (fir should include).regex("""intrinsic\(circt_debug_var<name = "outw">, outw_h\)""")
     }
 
-    it("flip: SpecifiedDirection only (naive)") {
-      val ms = mismatches(emit(DebugHandles.NaiveFlip))
-      println(s"NAIVE mismatches (${ms.size}):\n  " + ms.mkString("\n  "))
-      typeFlips(emit(DebugHandles.NaiveFlip)).size should be > 10
+    it("skips probe fields") {
+      val nodes = DebugTestUtils.debugTree(emitRaw(new DebugE2eAlu(8))).toMap
+      nodes.keySet should contain("io.result.ready")
+      nodes.keySet.filter(_.contains("accProbe")) shouldBe empty
     }
+  }
 
-    it("flip: Serializer rule (clearDir threaded)") {
-      val fir = emit(DebugHandles.EmitterFlip)
-      val ms = mismatches(fir)
-      println(s"EMITTER-RULE mismatches (${ms.size}):\n  " + ms.mkString("\n  "))
-      println(s"checked fields: ${typeFlips(fir).size}")
-      ms shouldBe empty
+  describe("flip matches the printed FIRRTL type") {
+    def check(gen: => RawModule): Unit = {
+      val fir = emitRaw(gen)
+      typeFlips(fir).values.count(identity) should be > 0
+      withClue(fir)(mismatches(fir) shouldBe empty)
+    }
+    it("on Flipped, Input/Output and Vec mixes")(check(new HandleFlipTop))
+    it("on the end-to-end fixtures") {
+      // Probe fields are printed but have no debug node.
+      val fir = emitRaw(new DebugE2eAlu(8))
+      mismatches(fir) shouldBe Seq("io.accProbe: printed flip=false, debug flip=-")
+      check(new DebugE2eGcd(16))
     }
   }
 }

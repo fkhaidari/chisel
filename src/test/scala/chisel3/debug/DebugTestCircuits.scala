@@ -8,6 +8,8 @@ import chisel3.util.MixedVec
 import circt.stage.ChiselStage
 import org.scalatest.matchers.should.Matchers
 
+import scala.collection.mutable
+
 object DebugTestEnum extends ChiselEnum { val EA, EB, EC = Value }
 object DebugTestEnum2 extends ChiselEnum { val ED, EE, EF = Value }
 
@@ -18,35 +20,11 @@ object DebugTestUtils extends Matchers {
   def countOccurrences(chirrtl: String, pattern: String): Int =
     pattern.r.findAllMatchIn(chirrtl).length
 
-  def getMissingOccurrences(chirrtl: String, pattern: String, expectedLines: Seq[String]): String = {
-    val lines = chirrtl.split("\n").toSeq
-    val anyR = (".*" + pattern + ".*").r
-    val idxs = lines.indices.filter(i => anyR.findFirstIn(lines(i)).isDefined)
-    val withNext =
-      idxs.flatMap(i => if (i < lines.length - 1) List(lines(i), lines(i + 1)) else List(lines(i))).distinct
-    val expRe = expectedLines.map(_.r)
-    withNext.filterNot(line => expRe.exists(_.findFirstIn(line).isDefined)).mkString("\n")
-  }
-
   private def attrPart(name: String, value: String): String = s"""[^)]*$name\\s*=\\s*"${q(value)}""""
-  private def enumPart(et:   Option[String]):        String = et.fold("")(attrPart("enumTypeName", _))
 
   private def intrinsic(kind: String, attrs: String*): String =
     s"""intrinsic\\(circt_debug_$kind<${attrs.mkString}"""
 
-  def varPattern(typeName: String, name: String, enumTypeName: Option[String] = None): String =
-    intrinsic("var", attrPart("typeName", typeName), attrPart("name", name), enumPart(enumTypeName))
-
-  def subfieldPattern(typeName: String, name: String, parent: String, enumTypeName: Option[String] = None): String =
-    intrinsic(
-      "subfield",
-      attrPart("typeName", typeName),
-      attrPart("name", name),
-      attrPart("parent", parent),
-      enumPart(enumTypeName)
-    )
-
-  def enumDefPattern(typeName:    String): String = intrinsic("enumdef", attrPart("typeName", typeName))
   def moduleInfoPattern(typeName: String): String = intrinsic("moduleinfo", attrPart("typeName", typeName))
 
   // Collapse whitespace so regex helpers ignore line wrapping.
@@ -77,14 +55,101 @@ object DebugTestUtils extends Matchers {
     params should include(s"${bq}value$bq:$valueJson")
   }
 
-  def checkIntrinsics(expected: Seq[(String, Int)], chirrtl: String): Unit = {
-    val names = expected.map(_._1)
-    expected.foreach { case (pattern, count) =>
-      withClue(s"Pattern '$pattern':\n${getMissingOccurrences(chirrtl, pattern, names)}\n") {
-        countOccurrences(chirrtl, pattern) should be(count)
+  /** One source-level node of a debug variable: a `circt_debug_value` (merged
+    * with the struct/array it wraps) or a `circt_debug_enum`.
+    */
+  case class DebugNode(kind: String, params: Map[String, String], operand: Option[String]) {
+    def flip: Boolean = params.get("flip").contains("1")
+
+    /** `[flip ]<kind> <typeName>`, kind omitted for ground leaves. */
+    def desc: String =
+      (if (flip) "flip " else "") + (if (kind == "value") "" else s"$kind ") + params.getOrElse("typeName", "?")
+  }
+
+  private val handleRe =
+    """^\s*node (\S+) = intrinsic\((circt_debug_\w+)(?:<(.*)>)? : UInt<0>(?:, ([^()]*))?\).*$""".r
+  private val varRe = """^\s*intrinsic\(circt_debug_var<name = "([^"]+)">, ([^()]+)\).*$""".r
+  private val paramRe = """(\w+) = ("(?:[^"\\]|\\.)*"|-?\d+)""".r
+
+  private def unquote(v: String): String =
+    if (v.startsWith("\"")) v.substring(1, v.length - 1).replace("\\\"", "\"").replace("\\\\", "\\") else v
+
+  /** Every variable's handle tree, flattened pre-order as `path -> node`. A path
+    * is a FIRRTL reference (`io.a`, `v[0]`). Fails on a malformed tree: a handle
+    * used before its definition or more than once, a struct child without
+    * `name`, `name`/`flip` on a root or array element, a value over a value, or a
+    * leaf operand that is not the reference its path names.
+    */
+  def debugTree(fir: String): Seq[(String, DebugNode)] = {
+    // `leaf` is the operand of a value/enum that is not a handle defined above.
+    case class H(kind: String, params: Map[String, String], args: Seq[String], leaf: Option[String])
+    val handles = mutable.Map.empty[String, H]
+    val used = mutable.Set.empty[String]
+    val roots = mutable.ArrayBuffer.empty[(String, String)]
+    def use(a: String): Unit = withClue(s"handle $a used twice: ")(used.add(a) shouldBe true)
+    fir.linesIterator.foreach {
+      case handleRe(h, k, ps, as) =>
+        val params = Option(ps).toSeq.flatMap(paramRe.findAllMatchIn(_)).map(m => m.group(1) -> unquote(m.group(2)))
+        val args = Option(as).toSeq.flatMap(_.split(", ").toSeq)
+        val leaf =
+          args.headOption.filter(a => !handles.contains(a) && (k == "circt_debug_value" || k == "circt_debug_enum"))
+        args.filterNot(leaf.contains).foreach { a =>
+          withClue(s"$h: operand $a is not a handle defined above: ")(handles.contains(a) shouldBe true)
+          use(a)
+        }
+        handles(h) = H(k, params.toMap, args, leaf)
+      case varRe(n, h) =>
+        withClue(s"var $n: operand $h is not a handle defined above: ")(handles.contains(h) shouldBe true)
+        use(h)
+        roots += (n -> h)
+      case _ => ()
+    }
+    val out = mutable.ArrayBuffer.empty[(String, DebugNode)]
+    def label(h: String): Map[String, String] = handles(h).params.filter { case (k, _) => k == "name" || k == "flip" }
+    def walk(h: String, path: String): Unit = {
+      val n = handles(h)
+      n.leaf.foreach(op => withClue(s"leaf $path: ")(op.replace("`", "") shouldBe path))
+      n.kind match {
+        case "circt_debug_enum" => out += path -> DebugNode("enum", n.params, n.leaf)
+        case "circt_debug_value" =>
+          n.args.size shouldBe 1
+          if (n.leaf.isDefined) out += path -> DebugNode("value", n.params, n.leaf)
+          else
+            handles(n.args.head) match {
+              case H("circt_debug_struct", ps, kids, _) =>
+                ps shouldBe empty
+                out += path -> DebugNode("struct", n.params, None)
+                kids.foreach { c =>
+                  val name = withClue(s"struct child of $path: ")(label(c).get("name").getOrElse(fail("no name")))
+                  walk(c, s"$path.$name")
+                }
+              case H("circt_debug_array", ps, kids, _) =>
+                ps shouldBe empty
+                out += path -> DebugNode("array", n.params, None)
+                kids.zipWithIndex.foreach { case (c, i) =>
+                  withClue(s"array element $path[$i]: ")(label(c) shouldBe empty)
+                  walk(c, s"$path[$i]")
+                }
+              case other => fail(s"$path: circt_debug_value over ${other.kind}")
+            }
+        case other => fail(s"$path: unexpected $other")
       }
     }
+    roots.foreach { case (n, h) =>
+      withClue(s"root $n: ")(label(h) shouldBe empty)
+      walk(h, n)
+    }
+    withClue("unused handles: ")(handles.keySet.diff(used) shouldBe empty)
+    withClue("duplicate paths: ")(out.map(_._1).distinct.size shouldBe out.size)
+    out.toSeq
   }
+
+  /** `path -> desc` of every debug node, see [[DebugNode.desc]]. */
+  def tree(gen: => RawModule): Seq[(String, String)] =
+    debugTree(emitRaw(gen)).map { case (p, n) => p -> n.desc }
+
+  def emitRaw(gen: => RawModule): String =
+    ChiselStage.emitCHIRRTL(gen, args = Array("--with-experimental-debug-intrinsics"))
 }
 
 object DebugTestCircuits {

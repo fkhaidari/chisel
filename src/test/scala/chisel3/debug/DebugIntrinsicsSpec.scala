@@ -106,10 +106,15 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
       countOccurrences(chirrtl, moduleInfoPattern("DebugMyIntrinsicMod")) should be(0)
     }
 
-    it("emits moduleinfo for chisel3.properties.Class (DefClass)") {
+    it("emits no debug intrinsics into a chisel3.properties.Class (DefClass) body") {
       val chirrtl = emit(new DebugWithClass)
       countOccurrences(chirrtl, moduleInfoPattern("DebugWithClass")) should be(1)
-      countOccurrences(chirrtl, moduleInfoPattern("DebugMyClass")) should be(1)
+      countOccurrences(chirrtl, moduleInfoPattern("DebugMyClass")) should be(0)
+      val classBody = chirrtl
+        .split("""(?=\b(?:public )?(?:module|class|extmodule) )""")
+        .find(_.startsWith("class DebugMyClass"))
+        .getOrElse(fail("no class DebugMyClass"))
+      (classBody should not).include("circt_debug_")
     }
 
     it("emits moduleinfo with params for a module whose port is a parametrized bundle") {
@@ -140,7 +145,8 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
     def countDebugIntrinsics(circuit: ir.Circuit): Int = {
       def inBlock(block: ir.Block): Int = {
         val direct = (block.getCommands() ++ block.getSecretCommands()).count {
-          case d: ir.DefIntrinsic => d.intrinsic.startsWith("circt_debug_")
+          case d: ir.DefIntrinsic        => d.intrinsic.startsWith("circt_debug_")
+          case d: ir.DefIntrinsicExpr[_] => d.intrinsic.startsWith("circt_debug_")
           case _ => false
         }
         val nested = block
