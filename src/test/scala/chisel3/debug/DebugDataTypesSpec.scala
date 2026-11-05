@@ -15,18 +15,13 @@ class DebugDataTypesSpec extends AnyFunSpec with Matchers {
   private def emitAndCheck(label: String, gen: => RawModule)(expected: Seq[(String, String)]): Unit =
     it(label)(tree(gen).toMap shouldBe expected.toMap)
 
-  def wrap(b: BindingChoice, t: String): String = b match {
-    case PortBinding => s"IO[$t]"
-    case WireBinding => s"Wire[$t]"
-    case RegBinding  => s"Reg[$t]"
-  }
-
   def clockResetFor(b: BindingChoice): Seq[(String, String)] =
-    if (b == RegBinding) Seq("clock" -> "IO[Clock]", "reset" -> "IO[Reset]")
+    if (b == RegBinding) Seq("clock" -> "Clock", "reset" -> "Reset")
     else Seq.empty
 
   def typeTests(b: BindingChoice): Unit = {
-    def w(t:  String) = wrap(b, t)
+    // The type name carries no binding.
+    def w(t:  String) = t
     def st(t: String) = s"struct ${w(t)}"
     def ar(t: String) = s"array ${w(t)}"
 
@@ -85,14 +80,14 @@ class DebugDataTypesSpec extends AnyFunSpec with Matchers {
   describe("Clock and Reset annotations") {
     emitAndCheck("should annotate explicit clock and reset types", new TopCircuitClockReset)(
       Seq(
-        "clock" -> "IO[Clock]",
-        "syncReset" -> "IO[Bool]",
-        "reset" -> "IO[Reset]",
-        "asyncReset" -> "IO[AsyncReset]"
+        "clock" -> "Clock",
+        "syncReset" -> "Bool",
+        "reset" -> "Reset",
+        "asyncReset" -> "AsyncReset"
       )
     )
     emitAndCheck("should annotate implicit clock and reset", new TopCircuitImplicitClockReset)(
-      Seq("clock" -> "IO[Clock]", "reset" -> "IO[Bool]")
+      Seq("clock" -> "Clock", "reset" -> "Bool")
     )
   }
 
@@ -107,11 +102,11 @@ class DebugDataTypesSpec extends AnyFunSpec with Matchers {
       debugTree(chirrtl).map { case (p, n) => p -> n.desc }.toMap shouldBe Map(
         "e" -> "enum DebugTestEnum",
         "e2" -> "enum DebugTestEnum2",
-        "bnd" -> "struct IO[AnonymousBundle]",
+        "bnd" -> "struct AnonymousBundle",
         "bnd.en" -> "enum DebugTestEnum",
         "bnd.en2" -> "enum DebugTestEnum2",
-        "bnd.x" -> "IO[UInt<8>]",
-        "v" -> "array IO[DebugTestEnum[3]]",
+        "bnd.x" -> "UInt<8>",
+        "v" -> "array DebugTestEnum[3]",
         "v[0]" -> "enum DebugTestEnum",
         "v[1]" -> "enum DebugTestEnum",
         "v[2]" -> "enum DebugTestEnum"
@@ -148,10 +143,10 @@ class DebugDataTypesSpec extends AnyFunSpec with Matchers {
     // debugTree checks that each leaf operand is the reference its path names.
     emitAndCheck("reference the declaration through the full path", new TopCircuitDeeplyNested)(
       Seq(
-        "io" -> "struct IO[MyDeeplyNestedBundle]",
-        "io.a" -> "struct IO[AnonymousBundle]",
-        "io.a.b" -> "struct IO[AnonymousBundle]",
-        "io.a.b.c" -> "IO[UInt<8>]"
+        "io" -> "struct MyDeeplyNestedBundle",
+        "io.a" -> "struct AnonymousBundle",
+        "io.a.b" -> "struct AnonymousBundle",
+        "io.a.b.c" -> "UInt<8>"
       )
     )
   }
@@ -184,14 +179,14 @@ class DebugDataTypesSpec extends AnyFunSpec with Matchers {
     it("should annotate named vals inside when blocks, in the when block") {
       val chirrtl = emitRaw(new TopCircuitWhenElse)
       (tree(new TopCircuitWhenElse) should contain).allOf(
-        "evenSel" -> "OpResult[UInt<8>]",
-        "selIsOne" -> "OpResult[UInt<8>]",
-        "oddSel" -> "OpResult[UInt<8>]"
+        "evenSel" -> "UInt<8>",
+        "selIsOne" -> "UInt<8>",
+        "oddSel" -> "UInt<8>"
       )
       // Deeper than the module body: emitted into the declaring block.
       (chirrtl should include).regex("""\n {6,}intrinsic\(circt_debug_var<name = "evenSel">""")
       (chirrtl should include).regex(
-        """\n {6,}node evenSel_h = intrinsic\(circt_debug_value<typeName = "OpResult\[UInt<8>\]"> : UInt<0>, evenSel\)"""
+        """\n {6,}node evenSel_h = intrinsic\(circt_debug_value<typeName = "UInt<8>"> : UInt<0>, evenSel\)"""
       )
     }
   }

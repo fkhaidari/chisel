@@ -107,7 +107,7 @@ private[chisel3] object DebugIntrinsics {
       if (params.isEmpty) Nil else Seq("params" -> StringParam(s"""{"x-chisel":{"params":${json.write(params)}}}"""))
 
     private def createIntrinsicMem(target: HasId, innerType: Data, size: BigInt, si: SourceInfo): Seq[Command] = {
-      val typeName = s"${target.getClass.getSimpleName}[${dataToTypeName(innerType)}[$size]]"
+      val typeName = s"${dataToTypeName(innerType)}[$size]"
       val name = target.getOptionRef
         .map(_.localName)
         .getOrElse(target match {

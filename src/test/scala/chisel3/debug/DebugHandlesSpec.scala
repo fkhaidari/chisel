@@ -137,14 +137,14 @@ class DebugHandlesSpec extends AnyFunSpec with Matchers {
     it("emits handles as node = intrinsic(...) and uses them as operands") {
       val fir = emitRaw(new HandleFlipTop)
       (fir should include).regex(
-        """node outw_a_h = intrinsic\(circt_debug_value<name = "a", typeName = "IO\[UInt<8>\]"> : UInt<0>, outw\.a\)"""
+        """node outw_a_h = intrinsic\(circt_debug_value<name = "a", typeName = "UInt<8>"> : UInt<0>, outw\.a\)"""
       )
       (fir should include).regex(
-        """node outw_f_x_h = intrinsic\(circt_debug_value<name = "x", typeName = "IO\[UInt<4>\]"> : UInt<0>, outw\.f\.x\)"""
+        """node outw_f_x_h = intrinsic\(circt_debug_value<name = "x", typeName = "UInt<4>"> : UInt<0>, outw\.f\.x\)"""
       )
       (fir should include).regex("""node outw_s = intrinsic\(circt_debug_struct : UInt<0>, outw_a_h, outw_f_h\)""")
       (fir should include).regex(
-        """node outw_h = intrinsic\(circt_debug_value<typeName = "IO\[AnonymousBundle\]"> : UInt<0>, outw_s\)"""
+        """node outw_h = intrinsic\(circt_debug_value<typeName = "AnonymousBundle"> : UInt<0>, outw_s\)"""
       )
       (fir should include).regex("""intrinsic\(circt_debug_var<name = "outw">, outw_h\)""")
     }
