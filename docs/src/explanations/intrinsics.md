@@ -52,16 +52,23 @@ downstream tooling (waveform viewers, debuggers) can reconstruct Bundle, Vec
 and `ChiselEnum` type names as well as module parameters that are lost during
 conversion to plain FIRRTL.
 
-The following intrinsics are emitted:
+Each signal is described by a small tree of intrinsics. Every node returns a
+`UInt<0>` handle, and a parent takes its children's handles as operands:
 
 - `circt_debug_moduleinfo` - one per module, with `typeName` and a JSON-encoded
   `params` string describing primary constructor arguments.
-- `circt_debug_var` - one per top-level signal, port or memory, with `typeName`
-  and `name`.
-- `circt_debug_subfield` - one per Bundle/Vec element, linked to its parent via
-  a `parent` attribute.
-- `circt_debug_enumdef` - one per `ChiselEnum` type (emitted once per circuit),
-  listing all variants and their literal values.
+- `circt_debug_var` - one per port, wire, register or named node, with `name`
+  and the handle of the signal's root node.
+- `circt_debug_value` - one per node, with `typeName`, optional `params`, and
+  `name`/`flip` when the node is a Bundle field. Its operand is the ground
+  signal itself or the handle of a struct/array.
+- `circt_debug_struct` / `circt_debug_array` - one per Bundle / Vec, over the
+  handles of its elements.
+- `circt_debug_enum` - one per `ChiselEnum` signal, with `typeName`, `fqn` and
+  one `variant_<Name>` parameter per value.
+
+Probe and Property fields get no node. Memories get an operand-less
+`circt_debug_var` with `typeName` and `name`.
 
 Emission is opt-in and off by default. Enable it by passing
 `--with-experimental-debug-intrinsics` on the command line, or by adding

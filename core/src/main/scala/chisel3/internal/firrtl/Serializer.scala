@@ -485,7 +485,7 @@ private[chisel3] object Serializer {
     case UnknownWidth      => // empty string
   }
 
-  private def firrtlUserDirOf(t: Data): SpecifiedDirection = t match {
+  private[chisel3] def firrtlUserDirOf(t: Data): SpecifiedDirection = t match {
     case t: Vec[_] =>
       SpecifiedDirection.fromParent(t.specifiedDirection, firrtlUserDirOf(t.sample_element))
     case t: Record if t._isOpaqueType =>

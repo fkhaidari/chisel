@@ -37,13 +37,16 @@ private[debug] object CtorParamExtractor {
   private[debug] val MaxRenderedLen = 256
   private[debug] val TruncatedSuffix = "...[truncated]"
 
+  // The type alone, without the binding (`UInt<8>`, not `IO[UInt<8>]`).
+  // The binding travels separately as the variable's direction and storage.
   private[debug] def dataToTypeName(data: Data): String = sanitize(data match {
-    case t: Record =>
-      t.topBindingOpt match {
-        case Some(binding) => s"${t._bindingToString(binding)}[${t.className}]"
-        case None          => t.className
-      }
-    case t => t.toString.split(" ").last
+    case t: Record => t.className
+    case t =>
+      val s = t.toString.split(" ").last
+      t.topBindingOpt
+        .map(b => s"${t._bindingToString(b)}[")
+        .filter(p => p != "[" && s.startsWith(p) && s.endsWith("]"))
+        .fold(s)(p => s.stripPrefix(p).stripSuffix("]"))
   })
 
   private def sanitize(s: String): String =
