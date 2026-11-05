@@ -25,8 +25,7 @@ class AddDebugIntrinsics extends Phase {
       annotations.flatMap {
         case EmitDebugIntrinsicsAnnotation => Nil
         case a: ChiselCircuitAnnotation =>
-          DebugIntrinsics.generate(a.elaboratedCircuit._circuit)
-          Seq(a)
+          a +: DebugIntrinsics.generate(a.elaboratedCircuit._circuit)
         case a => Seq(a)
       }
 }

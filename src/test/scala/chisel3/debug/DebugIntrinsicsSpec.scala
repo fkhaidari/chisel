@@ -100,6 +100,26 @@ class DebugIntrinsicsSpec extends AnyFunSpec with Matchers {
       countOccurrences(chirrtl, moduleInfoPattern("MyBlackBox")) should be(0)
     }
 
+    it("keys params by language") {
+      val chirrtl = emit(new DebugParamModule(5, true))
+      val params = requireParams(chirrtl, "DebugParamModule_w5_rtrue")
+      params should startWith("""{\"x-chisel\":{\"params\":[""")
+      params should endWith("]}}")
+    }
+
+    it("names a blackbox with DebugSourceNameAnnotation") {
+      import DebugTestCircuits.ModuleCircuits._
+      val chirrtl = emitRaw(new TopCircuitBlackBox)
+      chirrtl should include(""""class":"circt.DebugSourceNameAnnotation"""")
+      chirrtl should include(""""target":"~TopCircuitBlackBox|MyBlackBox"""")
+      chirrtl should include(""""name":"MyBlackBox"""")
+    }
+
+    it("emits no DebugSourceNameAnnotation without the debug opt-in") {
+      import DebugTestCircuits.ModuleCircuits._
+      (ChiselStage.emitCHIRRTL(new TopCircuitBlackBox) should not).include("DebugSourceNameAnnotation")
+    }
+
     it("does not emit moduleinfo for IntrinsicModule") {
       val chirrtl = emit(new DebugWithIntrinsic)
       countOccurrences(chirrtl, moduleInfoPattern("DebugWithIntrinsic")) should be(1)

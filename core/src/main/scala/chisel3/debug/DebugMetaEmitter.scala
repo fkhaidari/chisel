@@ -11,15 +11,21 @@ import chisel3.debug.CtorParamExtractor.dataToTypeName
 import chisel3.experimental.{BaseModule, SourceInfo}
 import chisel3.internal.firrtl.Serializer
 import chisel3.properties.Property
+import _root_.firrtl.annotations.Annotation
 
 import scala.collection.mutable
 import upickle.{default => json}
 
 private[chisel3] object DebugIntrinsics {
 
-  def generate(circuit: Circuit): Unit = {
+  /** Adds the debug intrinsics to `circuit` and returns the annotations they need. */
+  def generate(circuit: Circuit): Seq[Annotation] = {
     val emitter = new ComponentDebugEmitter
     circuit.components.foreach(emitter.generate)
+    // A black box has no body to hold `circt_debug_moduleinfo`.
+    circuit.components.collect { case bb: DefBlackBox =>
+      circt.DebugSourceNameAnnotation(s"~${circuit.name}|${bb.name}", bb.id.desiredName)
+    }
   }
 
   private def isIO(d:   SpecifiedDirection) = d == SpecifiedDirection.Input || d == SpecifiedDirection.Output
@@ -98,7 +104,7 @@ private[chisel3] object DebugIntrinsics {
       if (suppressDebugParams(target)) Nil else ctorExtractor.getCtorParams(target)
 
     private def paramsAttr(params: Seq[ClassParam]): Seq[(String, Param)] =
-      if (params.isEmpty) Nil else Seq("params" -> StringParam(json.write(params)))
+      if (params.isEmpty) Nil else Seq("params" -> StringParam(s"""{"x-chisel":{"params":${json.write(params)}}}"""))
 
     private def createIntrinsicMem(target: HasId, innerType: Data, size: BigInt, si: SourceInfo): Seq[Command] = {
       val typeName = s"${target.getClass.getSimpleName}[${dataToTypeName(innerType)}[$size]]"
